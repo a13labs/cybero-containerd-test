@@ -21,7 +21,6 @@ import (
 	cyberotypes "cybero/types"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"nodemanager"
@@ -111,16 +110,16 @@ func (mod nodeManagerHandlerModule) createAction(w http.ResponseWriter, r *http.
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&node)
 	if err != nil {
-		fmt.Printf("NodeManager: Error reading body, action: create, err: %v\n", err)
+		mod.logger.Printf("NodeManager: Error reading body, action: create, err: %v\n", err)
 		return err
 	}
 
 	// TODO: validate incoming node data pherarps???
 
 	// If we receive a valid node we try to create it
-	err = nodemanager.GetNodeManager(mod.logger).NodeCreate(&node)
+	err = nodemanager.GetNodeManager().NodeCreate(&node)
 	if err != nil {
-		fmt.Printf("NodeManager: Error creating node, node: %q, err: %v\n", node.Name, err)
+		mod.logger.Printf("NodeManager: Error creating node, node: %q, err: %v\n", node.Name, err)
 		return err
 	}
 

@@ -1,7 +1,6 @@
 package nodemanager
 
 import (
-	"log"
 	"os"
 	"syscall"
 	"testing"
@@ -11,19 +10,8 @@ import (
 // TestNodeManager Test NodeManage implementation
 func TestNodeManager(t *testing.T) {
 
-	logFile, err := os.OpenFile("/tmp/nodemanager-test.log",
-		os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-
-	defer logFile.Close()
-
-	// Initialize logging to a file
-	if err != nil {
-		t.Errorf("Error opening logfile, err: %v\n", err)
-		return
-	}
-
-	logger := log.New(logFile, "", log.LstdFlags)
-	nodeManager := GetNodeManager(logger)
+	var err error
+	nodeManager := GetNodeManager()
 
 	if nodeManager == nil {
 		t.Errorf("No nodemanager instance\n")
@@ -85,7 +73,7 @@ func TestNodeManager(t *testing.T) {
 		t.Errorf("Error sending signal to task, err: %v\n", err)
 	}
 
-	err = nodeManager.NodeDestroy(node)
+	err = nodeManager.NodeDestroy(node.Name)
 
 	if err != nil {
 		t.Errorf("Error destroying runtime, err: %v\n", err)

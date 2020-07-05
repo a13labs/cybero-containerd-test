@@ -14,7 +14,7 @@ type NodeSpec struct {
 	Env        []string
 	Devices    []specs.LinuxDevice
 	Caps       []string
-	Priviliged bool
+	Privileged bool
 	GIDs       string
 }
 

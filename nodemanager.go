@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -26,6 +27,9 @@ import (
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/api/services/tasks/v1"
 	"github.com/containerd/containerd/cio"
+	"github.com/containerd/containerd/containers"
+	"github.com/containerd/containerd/images"
+	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/oci"
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -62,7 +66,7 @@ func (manager *NodeManager) RuntimeExists(name string) bool {
 func (manager *NodeManager) RuntimePull(name string) error {
 
 	if manager.Client == nil {
-		manager.Logger.Println("NodeManager: Containerd not available")
+
 		return errors.New("Containerd available")
 	}
 
@@ -71,44 +75,45 @@ func (manager *NodeManager) RuntimePull(name string) error {
 	_, err := manager.Client.Pull(ctx, name, containerd.WithPullUnpack)
 
 	if err != nil {
-		manager.Logger.Printf("NodeManager: Error on runtime pull, runtime: %q, err: %v\n", name, err)
+
 		return err
 	}
 
-	manager.Logger.Printf("NodeManager: Runtime pulled, runtime: %q\n", name)
 	return nil
 }
 
-// RuntimeList list the available runtimes
-func (manager *NodeManager) RuntimeList() (*[]string, error) {
+// RuntimeDelete delete a local runtime
+func (manager *NodeManager) RuntimeDelete(name string) error {
 
 	if manager.Client == nil {
-		manager.Logger.Println("NodeManager: Containerd not available")
+
+		return errors.New("Containerd available")
+	}
+
+	ctx := namespaces.WithNamespace(context.Background(), defaultNamespace)
+
+	err := manager.Client.ImageService().Delete(ctx, name)
+
+	return err
+}
+
+// RuntimeList list the available runtimes
+func (manager *NodeManager) RuntimeList() ([]images.Image, error) {
+
+	if manager.Client == nil {
+
 		return nil, errors.New("Containerd available")
 	}
 
 	ctx := namespaces.WithNamespace(context.Background(), defaultNamespace)
-	runtimes, err := manager.Client.ImageService().List(ctx)
-
-	if err != nil {
-		manager.Logger.Printf("NodeManager: Error listing runtimes, err: %v\n", err)
-		return nil, err
-	}
-
-	result := make([]string, len(runtimes))
-
-	for i, runtime := range runtimes {
-		result[i] = runtime.Name
-	}
-
-	return &result, nil
+	return manager.Client.ImageService().List(ctx)
 }
 
 // NodeCreate create a node
 func (manager *NodeManager) NodeCreate(node *NodeSpec) error {
 
 	if manager.Client == nil {
-		manager.Logger.Println("NodeManager: Containerd not available")
+
 		return errors.New("Containerd available")
 	}
 
@@ -118,7 +123,7 @@ func (manager *NodeManager) NodeCreate(node *NodeSpec) error {
 	ctx := namespaces.WithNamespace(context.Background(), defaultNamespace)
 
 	if manager.NodeExists(node.Name) {
-		manager.Logger.Printf("NodeManager: NodeSpec runtime exists, node:%q\n", node.Name)
+
 		return errors.New("NodeSpec already exists")
 	}
 
@@ -127,18 +132,16 @@ func (manager *NodeManager) NodeCreate(node *NodeSpec) error {
 		runtime, err = manager.Client.Pull(ctx, node.Runtime, containerd.WithPullUnpack)
 
 		if err != nil {
-			manager.Logger.Printf("NodeManager: Error pulling runtime, runtime: %q, err: %v\n", node.Runtime, err)
+
 			return err
 		}
-
-		manager.Logger.Printf("NodeManager: Runtime pulled, runtime: %q\n", node.Runtime)
 
 	} else {
 
 		runtime, err = manager.Client.GetImage(ctx, node.Runtime)
 
 		if err != nil {
-			manager.Logger.Printf("NodeManager: Error getting runtime, runtime: %q, err: %v\n", node.Runtime, err)
+
 			return err
 		}
 	}
@@ -146,41 +149,47 @@ func (manager *NodeManager) NodeCreate(node *NodeSpec) error {
 	// TODO: add more specs like devices, env, etc
 	newOpts := containerd.WithNewSpec(
 		oci.WithImageConfig(runtime),
+		oci.WithEnv(node.Env),
+		oci.WithCapabilities(node.Caps),
 	)
 
-	snapShotname := node.Name + "-snapshot"
+	snapShotname := node.Name
 
-	_, err = manager.Client.NewContainer(
-		ctx,
-		node.Name,
-		containerd.WithNewSnapshot(snapShotname, runtime),
-		newOpts,
-	)
+	if node.Privileged {
 
-	if err != nil {
-		manager.Logger.Printf("NodeManager: Failed creating execution runtime, node %q, err: %v\n", node.Name, err)
-		return err
+		_, err = manager.Client.NewContainer(
+			ctx,
+			node.Name,
+			containerd.WithNewSnapshot(snapShotname, runtime),
+			newOpts,
+			containerd.WithNewSpec(oci.WithPrivileged),
+		)
+	} else {
+		_, err = manager.Client.NewContainer(
+			ctx,
+			node.Name,
+			containerd.WithNewSnapshot(snapShotname, runtime),
+			newOpts,
+		)
 	}
 
-	manager.Logger.Printf("NodeManager: Execution runtime created, node: %q\n", node.Name)
-	return nil
-
+	return err
 }
 
 // NodeDestroy destroy node
-func (manager *NodeManager) NodeDestroy(node *NodeSpec) error {
+func (manager *NodeManager) NodeDestroy(name string) error {
 
 	if manager.Client == nil {
-		manager.Logger.Println("NodeManager: Containerd not available")
-		return errors.New("Containerd available")
+
+		return errors.New("Containerd not available")
 	}
 
 	ctx := namespaces.WithNamespace(context.Background(), defaultNamespace)
 
-	container, err := manager.Client.LoadContainer(ctx, node.Name)
+	container, err := manager.Client.LoadContainer(ctx, name)
 
 	if err != nil {
-		manager.Logger.Printf("NodeManager: Error loading node runtime, node: %q, err: %v\n", node.Name, err)
+
 		return err
 	}
 
@@ -198,20 +207,27 @@ func (manager *NodeManager) NodeDestroy(node *NodeSpec) error {
 
 	err = container.Delete(ctx, containerd.WithSnapshotCleanup)
 
-	if err != nil {
-		manager.Logger.Printf("NodeManager: Error destroying execution runtime, node: %q, err: %v\n", node.Name, err)
-		return err
+	return err
+}
+
+// NodeList list existing Nodes
+func (manager *NodeManager) NodeList() ([]containers.Container, error) {
+
+	if manager.Client == nil {
+
+		return nil, errors.New("Containerd not available")
 	}
 
-	manager.Logger.Printf("NodeManager: Execution runtime destroyed, node: %q\n", node.Name)
-	return nil
+	ctx := namespaces.WithNamespace(context.Background(), defaultNamespace)
+
+	return manager.Client.ContainerService().List(ctx)
 }
 
 // NodeExists check if node exists
 func (manager *NodeManager) NodeExists(name string) bool {
 
 	if manager.Client == nil {
-		manager.Logger.Println("NodeManager: Containerd not available")
+
 		return false
 	}
 
@@ -226,7 +242,7 @@ func (manager *NodeManager) NodeExists(name string) bool {
 func (manager *NodeManager) NodeLoad(name string) (*NodeSpec, error) {
 
 	if manager.Client == nil {
-		manager.Logger.Println("NodeManager: Containerd not available")
+
 		return nil, errors.New("Containerd available")
 	}
 
@@ -235,7 +251,7 @@ func (manager *NodeManager) NodeLoad(name string) (*NodeSpec, error) {
 	container, err := manager.Client.ContainerService().Get(ctx, name)
 
 	if err != nil {
-		manager.Logger.Printf("NodeManager: Error loading execution runtime, node %q, err: %v\n", name, err)
+
 		return nil, err
 	}
 
@@ -245,30 +261,33 @@ func (manager *NodeManager) NodeLoad(name string) (*NodeSpec, error) {
 		// TODO: get missing properties
 	}
 
-	manager.Logger.Printf("NodeManager: Execution runtime loaded, node: %q\n", name)
 	return runtime, nil
+}
+
+// MountList list all mounts
+func (manager *NodeManager) MountList() ([]mount.Mount, error) {
+
+	if manager.Client == nil {
+		return nil, errors.New("Containerd not available")
+	}
+
+	ctx := namespaces.WithNamespace(context.Background(), defaultNamespace)
+
+	return manager.Client.SnapshotService(containerd.DefaultSnapshotter).Mounts(ctx, "")
 }
 
 // TaskExec execute a task inside a node
 func (manager *NodeManager) TaskExec(task *TaskSpec, stdin io.Reader, stdout io.Writer, stderr io.Writer) error {
 
 	if manager.Client == nil {
-		manager.Logger.Println("NodeManager: Containerd not available")
-		return errors.New("Containerd available")
+		return errors.New("Containerd not available")
 	}
 
 	ctx := namespaces.WithNamespace(context.Background(), defaultNamespace)
 
-	if !manager.NodeExists(task.Node.Name) {
-		if err := manager.NodeCreate(&task.Node); err != nil {
-			return err
-		}
-	}
-
 	container, err := manager.Client.LoadContainer(ctx, task.Node.Name)
 
 	if err != nil {
-		manager.Logger.Printf("NodeManager: Execution runtime does not exits, node: %q, err: %v\n", task.Node.Name, err)
 		return err
 	}
 
@@ -282,16 +301,17 @@ func (manager *NodeManager) TaskExec(task *TaskSpec, stdin io.Reader, stdout io.
 		)
 	}
 
+	fmt.Println(task.Name)
 	taskEnv, err := container.NewTask(ctx, ciOptions)
 
 	if err != nil {
-		manager.Logger.Printf("NodeManager: Error creating task, task: %q, node %q, err: %v\n", task.Name, task.Node.Name, err)
+
 		return err
 	}
 
 	_, err = taskEnv.Wait(ctx)
 	if err != nil {
-		manager.Logger.Printf("NodeManager: Error waiting task, task: %q, node %q, err: %v\n", task.Name, task.Node.Name, err)
+
 		return err
 	}
 
@@ -304,34 +324,47 @@ func (manager *NodeManager) TaskExec(task *TaskSpec, stdin io.Reader, stdout io.
 	process, err := taskEnv.Exec(ctx, task.Name, execOpts, ciOptions)
 
 	if err != nil {
-		manager.Logger.Printf("NodeManager: Error creating process, task: %q, node %q, args: %q, err: %v\n", task.Name, task.Node.Name, task.Args, err)
+
 		return err
 	}
 
 	err = process.Start(ctx)
 
 	if err != nil {
-		manager.Logger.Printf("NodeManager: Error starting process, task: %q, node %q, args: %q, err: %v\n", task.Name, task.Node.Name, task.Args, err)
+
 		return err
 	}
 
 	_, err = process.Wait(ctx)
 	if err != nil {
-		manager.Logger.Printf("NodeManager: Error waiting process, task: %q, node %q, args: %q, err: %v\n", task.Name, task.Node.Name, task.Args, err)
+
 		return err
 	}
 
 	task.PID = process.Pid()
-	manager.Logger.Printf("NodeManager: Task process started, pid: %d, task: %q, node %q, args: %q\n", task.PID, task.Name, task.Node.Name, task.Args)
+
 	return nil
+}
+
+// TaskList get a list of tasks
+func (manager *NodeManager) TaskList() (*tasks.ListTasksResponse, error) {
+
+	if manager.Client == nil {
+		return nil, errors.New("Containerd not available")
+	}
+
+	ctx := namespaces.WithNamespace(context.Background(), defaultNamespace)
+
+	var tr tasks.ListTasksRequest
+
+	return manager.Client.TaskService().List(ctx, &tr)
 }
 
 // SignalEmit send a signal to a node
 func (manager *NodeManager) SignalEmit(signal *SignalSpec) error {
 
 	if manager.Client == nil {
-		manager.Logger.Println("NodeManager: Containerd not available")
-		return errors.New("Containerd available")
+		return errors.New("Containerd not available")
 	}
 
 	ctx := namespaces.WithNamespace(context.Background(), defaultNamespace)
@@ -339,7 +372,6 @@ func (manager *NodeManager) SignalEmit(signal *SignalSpec) error {
 	container, err := manager.Client.LoadContainer(ctx, signal.Node)
 
 	if err != nil {
-		manager.Logger.Printf("NodeManager: Execution runtime does not exits, node: %q, err: %v\n", signal.Node, err)
 		return err
 	}
 
@@ -349,24 +381,17 @@ func (manager *NodeManager) SignalEmit(signal *SignalSpec) error {
 
 	taskEnv, err := container.Task(ctx, ciAttach)
 	if err != nil {
-		manager.Logger.Printf("NodeManager: Execution runtime is not started, node: %q, err: %v\n", signal.Node, err)
+
 		return err
 	}
 
 	process, err := taskEnv.LoadProcess(ctx, signal.Task, ciAttach)
 	if err != nil {
-		manager.Logger.Printf("NodeManager: Execution runtime task does not exits, task: %q, node: %q, err: %v\n", signal.Task, signal.Node, err)
+
 		return err
 	}
 
-	err = process.Kill(ctx, signal.Signal)
-	if err != nil {
-		manager.Logger.Printf("NodeManager: Error sending signal %d to task, task: %q, node: %q, err: %v\n", signal.Signal, signal.Task, signal.Node, err)
-		return err
-	}
-
-	manager.Logger.Printf("NodeManager: Signal %d sent, task: %q, node: %q, pid: %d\n", signal.Signal, signal.Task, signal.Node, process.Pid())
-	return nil
+	return process.Kill(ctx, signal.Signal)
 }
 
 // ProcessEnvelope Envelope processor
@@ -380,7 +405,7 @@ func (manager *NodeManager) ProcessEnvelope(reader io.Reader, writer io.Writer) 
 	err := decoder.Decode(&envelope)
 
 	if err != nil {
-		manager.Logger.Println("NodeManager: Error opening envelope")
+
 		return err
 	}
 
@@ -388,7 +413,7 @@ func (manager *NodeManager) ProcessEnvelope(reader io.Reader, writer io.Writer) 
 	case "NodeSpec":
 		var node NodeSpec
 		if err := json.Unmarshal(envelope.Message, &node); err != nil {
-			manager.Logger.Println("NodeManager: Error decoding node specification")
+
 			return err
 		}
 		switch envelope.Action {
@@ -399,19 +424,19 @@ func (manager *NodeManager) ProcessEnvelope(reader io.Reader, writer io.Writer) 
 			}
 			return err
 		case "destroy":
-			err := manager.NodeDestroy(&node)
+			err := manager.NodeDestroy(node.Name)
 			if err == nil {
 				encoder.Encode(&node)
 			}
 			return err
 		default:
-			manager.Logger.Printf("NodeManager: Error action not available, action: %q\n", envelope.Action)
+
 			return errors.New("Invalid action")
 		}
 	case "TaskSpec":
 		var task TaskSpec
 		if err := json.Unmarshal(envelope.Message, &task); err != nil {
-			manager.Logger.Println("NodeManager: Error decoding task specification")
+
 			return err
 		}
 		switch envelope.Action {
@@ -422,13 +447,13 @@ func (manager *NodeManager) ProcessEnvelope(reader io.Reader, writer io.Writer) 
 			}
 			return err
 		default:
-			manager.Logger.Printf("NodeManager: Error action not available, action: %q\n", envelope.Action)
+
 			return errors.New("Invalid action")
 		}
 	case "SignalSpec":
 		var signal SignalSpec
 		if err := json.Unmarshal(envelope.Message, &signal); err != nil {
-			manager.Logger.Println("Error decoding signal specification")
+
 			return err
 		}
 		switch envelope.Action {
@@ -439,43 +464,33 @@ func (manager *NodeManager) ProcessEnvelope(reader io.Reader, writer io.Writer) 
 			}
 			return err
 		default:
-			manager.Logger.Printf("NodeManager: Error action not available, action: %q\n", envelope.Action)
+
 			return errors.New("Invalid envelope")
 		}
 	default:
-		manager.Logger.Printf("Error decoding envelope, kind: %q\n", envelope.Kind)
+
 		return errors.New("Invalid envelope")
 	}
 }
 
 // GetNodeManager Initialize modules compoment
-func GetNodeManager(defaultLogger *log.Logger) *NodeManager {
+func GetNodeManager() *NodeManager {
 
 	var err error
 
-	if defaultLogger == nil {
-		defaultLogger = log.New(os.Stdout, "", log.LstdFlags)
-	}
-
 	nodeManagerSync.Do(func() {
 
-		nodeManager = &NodeManager{
-			Logger: defaultLogger,
-		}
-
-		defaultLogger.Printf("NodeManager: Initializing containerd\n")
-
+		nodeManager = &NodeManager{}
 		// Connect to the containerd socket
 		nodeManager.Client, err = containerd.New("/run/containerd/containerd.sock")
 
 		if err != nil {
-			defaultLogger.Printf("NodeManager: Error initializing runtime plugin\n")
-			return
+			panic(err)
 		}
 	})
 
 	if nodeManager == nil {
-		defaultLogger.Println("NodeManager: Something wen't wrong when starting NodeSpec manager!")
+		panic("NodeManager: Something wen't wrong when starting NodeSpec manager!")
 	}
 
 	return nodeManager
